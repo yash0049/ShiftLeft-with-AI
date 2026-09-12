@@ -1,0 +1,6 @@
+# These files are executed inside Linux containers (or by bash on the host).
+# Git's autocrlf on Windows would otherwise give them CRLF endings, which breaks
+# shebangs and nginx directives at runtime.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.conf      text eol=lf

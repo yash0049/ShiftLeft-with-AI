@@ -1,0 +1,47 @@
+name: securetrack
+
+services:
+  backend:
+    build: ./backend
+    image: securetrack-backend
+    environment:
+      # The SQLite file lives on the named volume below, so it survives
+      # `docker compose down` and image rebuilds.
+      DATABASE_URL: sqlite:////data/securetrack.db
+    volumes:
+      - securetrack-data:/data
+    ports:
+      # Exposed so you can curl the API directly; the frontend reaches it over
+      # the compose network rather than through this mapping.
+      - "5000:5000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:5000/health', timeout=2).status == 200 else 1)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    image: securetrack-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      # nginx resolves `backend` when it starts, so the API must be up first.
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  securetrack-data:

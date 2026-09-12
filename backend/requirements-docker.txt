@@ -1,0 +1,6 @@
+# Image dependencies: everything in requirements.txt (app + pytest, so the
+# container can run the test suite) plus a production WSGI server.
+# gunicorn is kept out of requirements.txt because it does not run on Windows,
+# where the local workflow uses `python run.py` instead.
+-r requirements.txt
+gunicorn==23.0.0

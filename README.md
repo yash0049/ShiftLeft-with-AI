@@ -8,29 +8,114 @@ found on them, with severity and remediation status on each finding.
 
 ```
 securetrack/
-├── backend/          Flask API + SQLite
+├── docker-compose.yml      backend + frontend + a volume for the SQLite file
+├── run-local.sh            build and start the whole stack
+├── test-local.sh           run the backend + frontend test suites
+├── backend/            Flask API + SQLite
 │   ├── app/
-│   │   ├── __init__.py       app factory
-│   │   ├── models.py         SQLAlchemy models
-│   │   ├── validation.py     request-body validation helpers
-│   │   ├── errors.py         JSON error handlers
-│   │   └── routes/           health, assets, vulnerabilities blueprints
-│   ├── tests/                pytest suite
-│   ├── run.py                dev entrypoint
-│   └── seed.py               optional sample data
-└── frontend/         React + Vite
-    └── src/
-        ├── api.js            fetch wrapper
-        ├── App.jsx           layout, state, tabs
-        └── components/       forms and tables
+│   │   ├── __init__.py         app factory
+│   │   ├── models.py           SQLAlchemy models
+│   │   ├── validation.py       request-body validation helpers
+│   │   ├── errors.py           JSON error handlers
+│   │   └── routes/             health, assets, vulnerabilities blueprints
+│   ├── tests/                  pytest suite
+│   ├── run.py                  dev entrypoint, and the gunicorn target
+│   ├── seed.py                 optional sample data
+│   └── Dockerfile              python:3.12-slim + gunicorn
+└── frontend/           React + Vite
+    ├── src/
+    │   ├── api.js              fetch wrapper
+    │   ├── App.jsx             layout, state, tabs
+    │   ├── components/         forms and tables
+    │   └── *.test.jsx          vitest suite
+    ├── nginx.conf              static hosting + /api proxy to the backend
+    └── Dockerfile              node build stage → nginx runtime
 ```
 
 ## Requirements
 
-- Python 3.10+
-- Node.js 18+
+There are two ways to run SecureTrack. Pick one:
 
-## Running it locally
+- **With Docker** — Docker Desktop (or Docker Engine) with Compose v2. Nothing else.
+- **Directly on your machine** — Python 3.10+ and Node.js 18+.
+
+## Quick start with Docker
+
+```bash
+./run-local.sh
+```
+
+That builds both images, starts the stack, waits until each service answers, and prints
+the URLs. Open <http://localhost:5173>.
+
+To come up with some data already in place:
+
+```bash
+./run-local.sh --seed
+```
+
+Everything the script takes:
+
+| Command                    | What it does                                          |
+| -------------------------- | ----------------------------------------------------- |
+| `./run-local.sh`           | Build, start, wait for health, print URLs             |
+| `./run-local.sh --seed`    | ...and load sample assets and findings                |
+| `./run-local.sh --logs`    | ...and then follow the logs                           |
+| `./run-local.sh --down`    | Stop and remove the stack                             |
+| `./run-local.sh --down -v` | ...and delete the SQLite volume, wiping all your data |
+
+> **On Windows**, run the scripts from Git Bash or WSL. From PowerShell, use the
+> `docker compose` commands directly — see [Without the script](#without-the-script).
+
+### What's running
+
+| Service    | Image                   | URL                     |
+| ---------- | ----------------------- | ----------------------- |
+| `frontend` | nginx serving the build | <http://localhost:5173> |
+| `backend`  | gunicorn running Flask  | <http://localhost:5000> |
+
+nginx serves the compiled React app and proxies `/api` and `/health` through to Flask over
+the compose network. Exactly as with the Vite dev proxy, the browser only ever talks to a
+single origin, so CORS stays out of the picture.
+
+The backend port is published as well, so you can still curl the API directly:
+
+```bash
+curl http://localhost:5000/health
+```
+
+### Where the data lives
+
+The SQLite file sits on a named Docker volume (`securetrack-data`) mounted at `/data` in
+the backend container, so it survives `docker compose down`, container restarts, and image
+rebuilds. Only `./run-local.sh --down -v` deletes it.
+
+To pull the database out for inspection or backup:
+
+```bash
+docker compose cp backend:/data/securetrack.db ./securetrack.db
+```
+
+If you would rather have the file sitting in the repo where you can see it, swap the named
+volume for a bind mount in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - ./data:/data # instead of: securetrack-data:/data
+```
+
+### Without the script
+
+The script is only a convenience wrapper. Plain Compose does the same:
+
+```bash
+docker compose up --build -d                  # start
+docker compose logs -f                        # follow logs
+docker compose exec backend python seed.py    # seed sample data
+docker compose down                           # stop
+```
+
+## Running without Docker
 
 You need two terminals: one for the API, one for the frontend.
 
@@ -75,9 +160,8 @@ npm run dev
 
 Open <http://localhost:5173>.
 
-The Vite dev server proxies `/api` and `/health` to Flask on port 5000, so the browser
-only ever talks to one origin and CORS never comes into play during development. If your
-backend runs somewhere else, point the proxy at it:
+The Vite dev server proxies `/api` and `/health` to Flask on port 5000. If your backend
+runs somewhere else, point the proxy at it:
 
 ```bash
 VITE_API_TARGET=http://127.0.0.1:8000 npm run dev
@@ -86,14 +170,40 @@ VITE_API_TARGET=http://127.0.0.1:8000 npm run dev
 ## Running the tests
 
 ```bash
-cd backend
-.venv\Scripts\Activate.ps1     # or: source .venv/bin/activate
-pytest
+./test-local.sh
 ```
 
-39 tests cover both resources: CRUD happy paths, validation failures, 404s, partial
-updates, query filters, and the cascade delete. They run against a throwaway in-memory
-SQLite database, so your local `securetrack.db` is never touched.
+That runs both suites inside Docker, so it needs no Python or Node on your machine. To use
+your local toolchain instead (the virtualenv in `backend/.venv`, and `npm`):
+
+```bash
+./test-local.sh --local
+```
+
+Either mode takes an optional target:
+
+```bash
+./test-local.sh --local backend    # just pytest
+./test-local.sh frontend           # just vitest, in Docker
+```
+
+The script exits non-zero if anything fails, and names the failing suite.
+
+**Backend — 39 pytest tests** covering CRUD happy paths, validation failures, 404s,
+partial updates, query filters, and the cascade delete. They run against a throwaway
+in-memory SQLite database, so your `securetrack.db` is never touched.
+
+**Frontend — 24 vitest tests** covering the API client (request shapes, the 204 case,
+error and field-error extraction, an unreachable API), the list components, and `App`
+itself — loading, the summary counts, tab switching, create, edit prefill, delete
+confirmation, and the offline banner — with the API module mocked.
+
+Either suite also runs the usual way:
+
+```bash
+cd backend  && pytest
+cd frontend && npm test
+```
 
 ## API reference
 
@@ -173,8 +283,16 @@ Missing records return `404` as `{"error": "Asset not found"}`.
 - **No authentication.** Every endpoint is open. This is a local development tool as it
   stands; don't expose it to a network without putting auth in front of it.
 - **No migrations.** Tables are created with `db.create_all()` at startup. If you change a
-  model, delete `backend/securetrack.db` and restart, or add Flask-Migrate.
+  model, delete the database and restart — `./run-local.sh --down -v` under Docker — or
+  add Flask-Migrate.
 - **Deleting an asset deletes its findings** along with it. The UI warns you and shows the
   count first.
-- `DATABASE_URL` overrides the SQLite location, and `CORS_ORIGINS` (comma-separated)
-  overrides the allowed origins if you run the frontend without the Vite proxy.
+- **SQLite and concurrency.** The container runs two gunicorn workers against one SQLite
+  file. That is fine at this scale, but SQLite serializes writes, so this arrangement
+  would not hold up under real write concurrency — that's the point to move to Postgres.
+- **nginx resolves the backend hostname once, at startup.** Compose waits for the backend
+  to pass its healthcheck before starting the frontend, so this is handled on the way up;
+  but if you recreate the backend container on its own, restart the frontend too.
+- `DATABASE_URL` overrides the SQLite location (the image sets it to
+  `/data/securetrack.db`), and `CORS_ORIGINS` (comma-separated) overrides the allowed
+  origins if you ever serve the frontend from another origin without a proxy.
