@@ -153,3 +153,45 @@ jobs:
       # joins the two. See .github/scripts/semgrep-gate.py.
       - name: Fail on high-severity findings
         run: python .github/scripts/semgrep-gate.py semgrep.sarif
+
+  checkov:
+    name: Checkov workflow scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov
+        run: pip install checkov==3.3.17
+
+      # --framework github_actions restricts this to the workflow files; there
+      # is no Terraform in the repo yet. --soft-fail keeps Checkov's own exit
+      # code from failing the job before the summary is written -- the gate step
+      # below decides what blocks.
+      - name: Run Checkov
+        run: |
+          checkov \
+            --directory . \
+            --framework github_actions \
+            --output json \
+            --output-file-path checkov-results \
+            --soft-fail \
+            --quiet
+
+      - name: Upload Checkov results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-results
+          path: checkov-results/
+          if-no-files-found: warn
+
+      # Writes the Markdown report to the job summary, then fails on blocking
+      # findings. Severity-based gating is not an option: open-source Checkov
+      # leaves severity null. See .github/scripts/checkov-gate.py.
+      - name: Summarise and gate
+        if: always()
+        run: python .github/scripts/checkov-gate.py checkov-results/results_json.json
