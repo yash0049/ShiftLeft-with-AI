@@ -99,3 +99,57 @@ jobs:
           tags: securetrack-frontend:ci
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+
+  semgrep:
+    name: Semgrep security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to publish results to the repository's Security tab.
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Semgrep's own CLI, pinned. The standalone semgrep-action is deprecated;
+      # Semgrep's current CI guidance is to run the CLI directly.
+      - name: Install Semgrep
+        run: pip install semgrep==1.177.0
+
+      # Scans at every severity and always exits 0 -- `--error` is deliberately
+      # not passed, so the SARIF upload steps below still run when there are
+      # findings. The gate at the end of the job decides what blocks the build.
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config=p/security-audit \
+            --config=p/owasp-top-ten \
+            --sarif --output=semgrep.sarif \
+            --metrics=off \
+            backend/ frontend/
+
+      - name: Upload SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          if-no-files-found: warn
+
+      # Fork PRs and private repos without Advanced Security cannot write code
+      # scanning results, so a failure here must not mask the scan itself.
+      - name: Upload SARIF to the Security tab
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      # Semgrep records severity on the rule, not on each SARIF result, so this
+      # joins the two. See .github/scripts/semgrep-gate.py.
+      - name: Fail on high-severity findings
+        run: python .github/scripts/semgrep-gate.py semgrep.sarif
